@@ -1,6 +1,6 @@
 import { Buffer } from "buffer";
 import { PDFDocument } from "pdf-lib";
-import signpdf from "@signpdf/signpdf";
+import signpdfModule from "@signpdf/signpdf";
 import { P12Signer } from "@signpdf/signer-p12";
 import { pdflibAddPlaceholder } from "@signpdf/placeholder-pdf-lib";
 import { SUBFILTER_ETSI_CADES_DETACHED } from "@signpdf/utils";
@@ -40,6 +40,14 @@ function normalizeText(value: string): string {
 
 function toBuffer(bytes: Uint8Array): Buffer {
   return Buffer.from(bytes);
+}
+
+function getSignPdf() {
+  const signpdf = (signpdfModule as { default?: { sign: (pdf: Buffer, signer: P12Signer) => Promise<Buffer> } }).default;
+  if (!signpdf?.sign) {
+    throw new Error("PDF signing library is not available.");
+  }
+  return signpdf;
 }
 
 function isPasswordError(error: unknown): boolean {
@@ -97,11 +105,14 @@ export async function signPdfDocument(input: SignPdfInput): Promise<Uint8Array> 
     const signer = new P12Signer(toBuffer(input.certificateBytes), {
       passphrase: input.certificatePassword
     });
-    const signedPdf = await signpdf.sign(toBuffer(preparedPdf), signer);
+    const signedPdf = await getSignPdf().sign(toBuffer(preparedPdf), signer);
     return new Uint8Array(signedPdf);
   } catch (error) {
     if (isPasswordError(error)) {
       throw new PdfSignerError("PASSWORD_INCORRECT", "The certificate password is incorrect.");
+    }
+    if (error instanceof Error && error.message === "PDF signing library is not available.") {
+      throw new PdfSignerError("SIGNING_FAILED", error.message);
     }
     throw new PdfSignerError("SIGNING_FAILED", "Signing failed. Please verify the PDF and certificate, then try again.");
   }
