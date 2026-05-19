@@ -26,10 +26,19 @@ export type PdfSignerErrorCode =
 
 export class PdfSignerError extends Error {
   code: PdfSignerErrorCode;
+  stage: "validate" | "pdf-placeholder" | "certificate" | "signing";
+  details?: string;
 
-  constructor(code: PdfSignerErrorCode, message: string) {
+  constructor(
+    code: PdfSignerErrorCode,
+    message: string,
+    stage: "validate" | "pdf-placeholder" | "certificate" | "signing",
+    details?: string
+  ) {
     super(message);
     this.code = code;
+    this.stage = stage;
+    this.details = details;
     this.name = "PdfSignerError";
   }
 }
@@ -44,7 +53,24 @@ function toBuffer(bytes: Uint8Array): Buffer {
 
 function isPasswordError(error: unknown): boolean {
   const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-  return message.includes("password") || message.includes("mac verify") || message.includes("pkcs12");
+  return (
+    message.includes("invalid password") ||
+    message.includes("wrong password") ||
+    message.includes("mac could not be verified") ||
+    message.includes("unable to decrypt pkcs#8 shroudedkeybag")
+  );
+}
+
+function isCertificateFormatError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return (
+    message.includes("asn.1") ||
+    message.includes("pfx") ||
+    message.includes("pkcs#12") ||
+    message.includes("pkcs12") ||
+    message.includes("certificate") ||
+    message.includes("private key")
+  );
 }
 
 export function sanitizeFileName(name: string): string {
@@ -57,15 +83,15 @@ export async function signPdfDocument(input: SignPdfInput): Promise<Uint8Array> 
   const reason = normalizeText(input.reason) || "Signed for personal use";
 
   if (!input.pdfBytes?.length) {
-    throw new PdfSignerError("INVALID_PDF", "The PDF file is empty or unreadable.");
+    throw new PdfSignerError("INVALID_PDF", "The PDF file is empty or unreadable.", "validate");
   }
 
   if (!input.certificateBytes?.length) {
-    throw new PdfSignerError("INVALID_CERTIFICATE", "The certificate file is empty or unreadable.");
+    throw new PdfSignerError("INVALID_CERTIFICATE", "The certificate file is empty or unreadable.", "validate");
   }
 
   if (!input.certificatePassword.trim()) {
-    throw new PdfSignerError("PASSWORD_REQUIRED", "Certificate password is required.");
+    throw new PdfSignerError("PASSWORD_REQUIRED", "Certificate password is required.", "validate");
   }
 
   let pdfDoc: PDFDocument;
@@ -74,24 +100,37 @@ export async function signPdfDocument(input: SignPdfInput): Promise<Uint8Array> 
       ignoreEncryption: false
     });
   } catch {
-    throw new PdfSignerError("INVALID_PDF", "The selected PDF is invalid or encrypted in a way this tool cannot sign.");
+    throw new PdfSignerError(
+      "INVALID_PDF",
+      "The selected PDF is invalid or encrypted in a way this tool cannot sign.",
+      "validate"
+    );
   }
 
   pdfDoc.setAuthor(signerName || "Personal signer");
   pdfDoc.setSubject(reason);
   pdfDoc.setTitle(pdfDoc.getTitle() ?? "Signed document");
 
-  pdflibAddPlaceholder({
-    pdfDoc,
-    reason,
-    name: signerName || "Personal signer",
-    contactInfo: signerName || "Personal signer",
-    location: "Personal use",
-    signatureLength: 16384,
-    subFilter: SUBFILTER_ETSI_CADES_DETACHED
-  });
-
-  const preparedPdf = await pdfDoc.save({ useObjectStreams: false });
+  let preparedPdf: Uint8Array;
+  try {
+    pdflibAddPlaceholder({
+      pdfDoc,
+      reason,
+      name: signerName || "Personal signer",
+      contactInfo: signerName || "Personal signer",
+      location: "Personal use",
+      signatureLength: 16384,
+      subFilter: SUBFILTER_ETSI_CADES_DETACHED
+    });
+    preparedPdf = await pdfDoc.save({ useObjectStreams: false });
+  } catch (error) {
+    throw new PdfSignerError(
+      "SIGNING_FAILED",
+      "Unable to prepare the PDF for signing.",
+      "pdf-placeholder",
+      error instanceof Error ? error.message : String(error)
+    );
+  }
 
   try {
     const signer = new P12Signer(toBuffer(input.certificateBytes), {
@@ -102,8 +141,26 @@ export async function signPdfDocument(input: SignPdfInput): Promise<Uint8Array> 
     return new Uint8Array(signedPdf);
   } catch (error) {
     if (isPasswordError(error)) {
-      throw new PdfSignerError("PASSWORD_INCORRECT", "The certificate password is incorrect.");
+      throw new PdfSignerError(
+        "PASSWORD_INCORRECT",
+        "The certificate password is incorrect.",
+        "certificate",
+        error instanceof Error ? error.message : String(error)
+      );
     }
-    throw new PdfSignerError("SIGNING_FAILED", "Signing failed. Please verify the PDF and certificate, then try again.");
+    if (isCertificateFormatError(error)) {
+      throw new PdfSignerError(
+        "INVALID_CERTIFICATE",
+        "The certificate file is invalid or corrupted.",
+        "certificate",
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+    throw new PdfSignerError(
+      "SIGNING_FAILED",
+      "Signing failed. Please verify the PDF and certificate, then try again.",
+      "signing",
+      error instanceof Error ? error.message : String(error)
+    );
   }
 }

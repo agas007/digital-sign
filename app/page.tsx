@@ -13,6 +13,11 @@ import {
 } from "@/lib/pdfSigner";
 
 type Notice = { type: "error" | "success" | "info"; message: string } | null;
+type ErrorDiagnostics = {
+  code?: string;
+  stage?: string;
+  details?: string;
+} | null;
 
 function isPdf(file: File | null) {
   return file?.type === "application/pdf" || !!file?.name.toLowerCase().endsWith(".pdf");
@@ -63,12 +68,14 @@ export default function Home() {
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [certificateFile, setCertificateFile] = useState<File | null>(null);
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [signerName, setSignerName] = useState("");
   const [reason, setReason] = useState("Signed for personal use");
   const [savedCertificate, setSavedCertificate] = useState<StoredCertificate | null>(null);
   const [savingCertificate, setSavingCertificate] = useState(false);
   const [signing, setSigning] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
+  const [errorDiagnostics, setErrorDiagnostics] = useState<ErrorDiagnostics>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -81,6 +88,7 @@ export default function Home() {
 
   async function handleSaveCertificate() {
     setNotice(null);
+    setErrorDiagnostics(null);
     setFieldErrors((current) => ({ ...current, certificate: "" }));
 
     if (!certificateFile) {
@@ -113,12 +121,14 @@ export default function Home() {
   async function handleRemoveCertificate() {
     await removeCertificate();
     setSavedCertificate(null);
+    setErrorDiagnostics(null);
     setNotice({ type: "info", message: "Saved certificate removed from this browser." });
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setNotice(null);
+    setErrorDiagnostics(null);
 
     const errors: Record<string, string> = {};
 
@@ -185,6 +195,11 @@ export default function Home() {
       } catch (error) {
         if (error instanceof PdfSignerError) {
           setNotice({ type: "error", message: error.message });
+          setErrorDiagnostics({
+            code: error.code,
+            stage: error.stage,
+            details: error.details
+          });
           return;
         }
 
@@ -219,6 +234,11 @@ export default function Home() {
                   ? serverError.message
                   : "Signing failed. Please verify the PDF and certificate, then try again."
             });
+            setErrorDiagnostics({
+              code: "SERVER_FALLBACK_FAILED",
+              stage: "signing",
+              details: serverError instanceof Error ? serverError.message : String(serverError)
+            });
             return;
           }
         }
@@ -227,16 +247,31 @@ export default function Home() {
           type: "error",
           message: "Signing failed. Please verify the PDF and certificate, then try again."
         });
+        setErrorDiagnostics({
+          code: "SIGNING_FAILED",
+          stage: "signing",
+          details: error instanceof Error ? error.message : String(error)
+        });
       }
     } catch (error) {
       if (error instanceof PdfSignerError) {
         setNotice({ type: "error", message: error.message });
+        setErrorDiagnostics({
+          code: error.code,
+          stage: error.stage,
+          details: error.details
+        });
         return;
       }
 
       setNotice({
         type: "error",
         message: "Signing failed. Please verify the PDF and certificate, then try again."
+      });
+      setErrorDiagnostics({
+        code: "UNEXPECTED_ERROR",
+        stage: "signing",
+        details: error instanceof Error ? error.message : String(error)
       });
     } finally {
       setSigning(false);
@@ -345,13 +380,36 @@ export default function Home() {
               <div className="grid gap-6 md:grid-cols-2">
                 <label className="block">
                   <span className="text-sm font-medium text-slate-900">Password *</span>
-                  <input
-                    type="password"
-                    value={password}
-                    onChange={(event) => setPassword(event.target.value)}
-                    className="mt-2 w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-slate-500"
-                    placeholder="Certificate password"
-                  />
+                  <div className="mt-2 flex items-stretch overflow-hidden rounded-2xl border border-slate-300 bg-white transition focus-within:border-slate-500">
+                    <input
+                      type={showPassword ? "text" : "password"}
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                      className="min-w-0 flex-1 bg-transparent px-4 py-3 text-sm outline-none placeholder:text-slate-400"
+                      placeholder="Certificate password"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((current) => !current)}
+                      className="inline-flex items-center justify-center px-4 text-slate-500 transition hover:text-slate-900"
+                      aria-label={showPassword ? "Hide password" : "Show password"}
+                      title={showPassword ? "Hide password" : "Show password"}
+                    >
+                      {showPassword ? (
+                        <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M3 3l18 18" />
+                          <path d="M10.58 10.58a2 2 0 0 0 2.83 2.83" />
+                          <path d="M9.88 5.08A10.94 10.94 0 0 1 12 5c5.5 0 9.5 7 9.5 7a19.37 19.37 0 0 1-4.32 4.94" />
+                          <path d="M6.23 6.23A19.37 19.37 0 0 0 2.5 12s4 7 9.5 7a10.95 10.95 0 0 0 3.45-.56" />
+                        </svg>
+                      ) : (
+                        <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M2.5 12s3.9-7 9.5-7 9.5 7 9.5 7-3.9 7-9.5 7-9.5-7-9.5-7Z" />
+                          <circle cx="12" cy="12" r="3" />
+                        </svg>
+                      )}
+                    </button>
+                  </div>
                   {fieldErrors.password ? (
                     <p className="mt-2 text-sm text-rose-700">{fieldErrors.password}</p>
                   ) : null}
@@ -416,6 +474,25 @@ export default function Home() {
               >
                 {notice.message}
               </div>
+            ) : null}
+
+            {errorDiagnostics ? (
+              <details className="mt-4 rounded-2xl border border-slate-200 bg-white/80 p-4 text-sm text-slate-700">
+                <summary className="cursor-pointer font-medium text-slate-900">
+                  Show diagnostics
+                </summary>
+                <div className="mt-3 grid gap-2 text-xs leading-5 text-slate-600">
+                  <p>
+                    <span className="font-semibold text-slate-900">Code:</span> {errorDiagnostics.code ?? "-"}
+                  </p>
+                  <p>
+                    <span className="font-semibold text-slate-900">Stage:</span> {errorDiagnostics.stage ?? "-"}
+                  </p>
+                  <p className="break-words">
+                    <span className="font-semibold text-slate-900">Details:</span> {errorDiagnostics.details ?? "-"}
+                  </p>
+                </div>
+              </details>
             ) : null}
           </form>
         </section>
