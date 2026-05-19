@@ -1,5 +1,5 @@
 import { Buffer } from "buffer";
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, rgb } from "pdf-lib";
 import { SignPdf } from "@signpdf/signpdf";
 import { P12Signer } from "@signpdf/signer-p12";
 import { pdflibAddPlaceholder } from "@signpdf/placeholder-pdf-lib";
@@ -8,6 +8,26 @@ import { SUBFILTER_ETSI_CADES_DETACHED } from "@signpdf/utils";
 export const MAX_PDF_BYTES = 10 * 1024 * 1024;
 export const MAX_CERT_BYTES = 1 * 1024 * 1024;
 export const MAX_SERVER_BYTES = 4 * 1024 * 1024;
+export const MAX_VISIBLE_SIGNATURE_BYTES = 2 * 1024 * 1024;
+
+export type PDFPageSize = {
+  width: number;
+  height: number;
+};
+
+export type VisibleSignaturePlacement = {
+  pageIndex: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type VisibleSignatureImage = {
+  bytes: Uint8Array;
+  mimeType: "image/png" | "image/jpeg";
+  placement: VisibleSignaturePlacement;
+};
 
 export type SignPdfInput = {
   pdfBytes: Uint8Array;
@@ -15,6 +35,7 @@ export type SignPdfInput = {
   certificatePassword: string;
   signerName: string;
   reason: string;
+  visibleSignature?: VisibleSignatureImage;
 };
 
 export type PdfSignerErrorCode =
@@ -78,6 +99,56 @@ export function sanitizeFileName(name: string): string {
   return `${base}-signed.pdf`;
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+async function applyVisibleSignature(pdfDoc: PDFDocument, visibleSignature: VisibleSignatureImage): Promise<void> {
+  if (!visibleSignature.bytes.length) {
+    throw new PdfSignerError(
+      "INVALID_CERTIFICATE",
+      "The signature image file is empty or unreadable.",
+      "validate"
+    );
+  }
+
+  const pages = pdfDoc.getPages();
+  const page = pages[visibleSignature.placement.pageIndex] ?? pages[0];
+  if (!page) {
+    throw new PdfSignerError("INVALID_PDF", "The PDF has no pages.", "validate");
+  }
+
+  const pageSize = page.getSize();
+  const placement = visibleSignature.placement;
+  const width = clamp(placement.width, 24, pageSize.width);
+  const height = clamp(placement.height, 24, pageSize.height);
+  const x = clamp(placement.x, 0, Math.max(0, pageSize.width - width));
+  const yTop = clamp(placement.y, 0, Math.max(0, pageSize.height - height));
+  const y = pageSize.height - yTop - height;
+
+  const image =
+    visibleSignature.mimeType === "image/png"
+      ? await pdfDoc.embedPng(visibleSignature.bytes)
+      : await pdfDoc.embedJpg(visibleSignature.bytes);
+
+  page.drawRectangle({
+    x,
+    y,
+    width,
+    height,
+    borderColor: rgb(0.64, 0.72, 0.84),
+    borderWidth: 1,
+    color: rgb(1, 1, 1),
+    opacity: 0.96
+  });
+  page.drawImage(image, {
+    x,
+    y,
+    width,
+    height
+  });
+}
+
 export async function signPdfDocument(input: SignPdfInput): Promise<Uint8Array> {
   const signerName = normalizeText(input.signerName);
   const reason = normalizeText(input.reason) || "Signed for personal use";
@@ -92,6 +163,23 @@ export async function signPdfDocument(input: SignPdfInput): Promise<Uint8Array> 
 
   if (!input.certificatePassword.trim()) {
     throw new PdfSignerError("PASSWORD_REQUIRED", "Certificate password is required.", "validate");
+  }
+
+  if (input.visibleSignature?.bytes?.length) {
+    if (input.visibleSignature.bytes.length > MAX_VISIBLE_SIGNATURE_BYTES) {
+      throw new PdfSignerError(
+        "INVALID_CERTIFICATE",
+        "The signature image must be 2 MB or smaller.",
+        "validate"
+      );
+    }
+    if (!["image/png", "image/jpeg"].includes(input.visibleSignature.mimeType)) {
+      throw new PdfSignerError(
+        "INVALID_CERTIFICATE",
+        "The signature image must be a PNG or JPG file.",
+        "validate"
+      );
+    }
   }
 
   let pdfDoc: PDFDocument;
@@ -113,6 +201,9 @@ export async function signPdfDocument(input: SignPdfInput): Promise<Uint8Array> 
 
   let preparedPdf: Uint8Array;
   try {
+    if (input.visibleSignature) {
+      await applyVisibleSignature(pdfDoc, input.visibleSignature);
+    }
     pdflibAddPlaceholder({
       pdfDoc,
       reason,

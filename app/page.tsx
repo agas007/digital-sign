@@ -2,11 +2,16 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import FileUpload from "@/components/FileUpload";
+import SignaturePlacementEditor from "@/components/SignaturePlacementEditor";
 import { loadCertificate, removeCertificate, saveCertificate, type StoredCertificate } from "@/lib/certificateVault";
+import { PDFDocument } from "pdf-lib";
 import {
   MAX_CERT_BYTES,
   MAX_PDF_BYTES,
   MAX_SERVER_BYTES,
+  MAX_VISIBLE_SIGNATURE_BYTES,
+  type PDFPageSize,
+  type VisibleSignaturePlacement,
   PdfSignerError,
   sanitizeFileName,
   signPdfDocument
@@ -25,6 +30,48 @@ function isPdf(file: File | null) {
 
 function isCertificate(file: File | null) {
   return !!file && /\.(p12|pfx)$/i.test(file.name);
+}
+
+function isSignatureImage(file: File | null) {
+  return !!file && /(\.png|\.jpe?g)$/i.test(file.name);
+}
+
+function getSignatureImageMimeType(file: File) {
+  if (file.type === "image/png" || /\.png$/i.test(file.name)) {
+    return "image/png";
+  }
+  return "image/jpeg";
+}
+
+function getDefaultPlacement(pageSize: PDFPageSize, imageAspectRatio: number): VisibleSignaturePlacement {
+  const safeRatio = Number.isFinite(imageAspectRatio) && imageAspectRatio > 0 ? imageAspectRatio : 2.8;
+  const width = Math.min(Math.max(120, pageSize.width * 0.3), 220);
+  const height = width / safeRatio;
+  const margin = 24;
+
+  return {
+    pageIndex: 0,
+    x: Math.max(margin, pageSize.width - width - margin),
+    y: Math.max(margin, pageSize.height - height - margin),
+    width,
+    height
+  };
+}
+
+function toBrowserFile(bytes: Uint8Array, fileName: string, type: string) {
+  const copy = new Uint8Array(bytes.length);
+  copy.set(bytes);
+  return new File([copy.buffer], fileName, { type });
+}
+
+function placementToFormData(placement: VisibleSignaturePlacement) {
+  return {
+    pageIndex: String(placement.pageIndex),
+    x: String(placement.x),
+    y: String(placement.y),
+    width: String(placement.width),
+    height: String(placement.height)
+  };
 }
 
 async function downloadBytes(bytes: Uint8Array, filename: string) {
@@ -58,15 +105,15 @@ async function signViaServer(formData: FormData) {
   return new Uint8Array(await response.arrayBuffer());
 }
 
-function toBrowserFile(bytes: Uint8Array, fileName: string, type: string) {
-  const copy = new Uint8Array(bytes.length);
-  copy.set(bytes);
-  return new File([copy.buffer], fileName, { type });
-}
-
 export default function Home() {
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [certificateFile, setCertificateFile] = useState<File | null>(null);
+  const [signatureImageFile, setSignatureImageFile] = useState<File | null>(null);
+  const [signatureImageUrl, setSignatureImageUrl] = useState<string | null>(null);
+  const [signatureImageAspectRatio, setSignatureImageAspectRatio] = useState<number | null>(null);
+  const [pageSize, setPageSize] = useState<PDFPageSize | null>(null);
+  const [signaturePlacement, setSignaturePlacement] = useState<VisibleSignaturePlacement | null>(null);
+  const [placementDirty, setPlacementDirty] = useState(false);
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [signerName, setSignerName] = useState("");
@@ -83,6 +130,83 @@ export default function Home() {
       .then(setSavedCertificate)
       .catch(() => setSavedCertificate(null));
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadPageMeta() {
+      if (!pdfFile) {
+        setPageSize(null);
+        return;
+      }
+
+      try {
+        const bytes = await pdfFile.arrayBuffer();
+        const doc = await PDFDocument.load(bytes);
+        const firstPage = doc.getPages()[0];
+
+        if (!firstPage) {
+          throw new Error("The PDF has no pages.");
+        }
+
+        if (!cancelled) {
+          setPageSize(firstPage.getSize());
+        }
+      } catch {
+        if (!cancelled) {
+          setPageSize(null);
+        }
+      }
+    }
+
+    loadPageMeta();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pdfFile]);
+
+  useEffect(() => {
+    if (!signatureImageFile) {
+      setSignatureImageUrl(null);
+      setSignatureImageAspectRatio(null);
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(signatureImageFile);
+    setSignatureImageUrl(objectUrl);
+
+    let cancelled = false;
+    const image = new Image();
+    image.onload = () => {
+      if (!cancelled) {
+        setSignatureImageAspectRatio(image.naturalWidth / image.naturalHeight);
+      }
+    };
+    image.onerror = () => {
+      if (!cancelled) {
+        setSignatureImageAspectRatio(null);
+      }
+    };
+    image.src = objectUrl;
+
+    return () => {
+      cancelled = true;
+      URL.revokeObjectURL(objectUrl);
+    };
+  }, [signatureImageFile]);
+
+  useEffect(() => {
+    setPlacementDirty(false);
+  }, [pdfFile, signatureImageFile]);
+
+  useEffect(() => {
+    if (!pageSize || !signatureImageAspectRatio || placementDirty) {
+      return;
+    }
+
+    setSignaturePlacement(getDefaultPlacement(pageSize, signatureImageAspectRatio));
+  }, [pageSize, placementDirty, signatureImageAspectRatio]);
 
   const hasStoredCertificate = Boolean(savedCertificate);
 
@@ -148,6 +272,22 @@ export default function Home() {
       errors.password = "Certificate password is required.";
     }
 
+    if (!signatureImageFile) {
+      errors.signatureImage = "Upload a PNG or JPG to create a visible placeholder.";
+    } else if (!isSignatureImage(signatureImageFile)) {
+      errors.signatureImage = "Signature image must be a PNG or JPG file.";
+    } else if (signatureImageFile.size > MAX_VISIBLE_SIGNATURE_BYTES) {
+      errors.signatureImage = "Signature image must be 2 MB or smaller.";
+    }
+
+    if (!pageSize) {
+      errors.signatureImage = errors.signatureImage ?? "Wait for the PDF preview to load.";
+    }
+
+    if (!signaturePlacement) {
+      errors.signatureImage = errors.signatureImage ?? "Place the visible signature on the PDF preview first.";
+    }
+
     const certificateToUse = certificateFile ?? savedCertificate;
 
     if (!certificateToUse) {
@@ -164,7 +304,7 @@ export default function Home() {
 
     setFieldErrors(errors);
 
-    if (Object.keys(errors).length > 0 || !pdfFile || !certificateToUse) {
+    if (Object.keys(errors).length > 0 || !pdfFile || !certificateToUse || !signatureImageFile || !signaturePlacement || !pageSize) {
       return;
     }
 
@@ -177,6 +317,7 @@ export default function Home() {
         : savedCertificate
           ? savedCertificate.bytes
           : new Uint8Array();
+      const signatureBytes = new Uint8Array(await signatureImageFile.arrayBuffer());
 
       try {
         const signed = await signPdfDocument({
@@ -184,7 +325,12 @@ export default function Home() {
           certificateBytes: certBytes,
           certificatePassword: password,
           signerName,
-          reason
+          reason,
+          visibleSignature: {
+            bytes: signatureBytes,
+            mimeType: getSignatureImageMimeType(signatureImageFile),
+            placement: signaturePlacement
+          }
         });
 
         await downloadBytes(signed, sanitizeFileName(pdfFile.name));
@@ -217,6 +363,10 @@ export default function Home() {
           formData.set("password", password);
           formData.set("signerName", signerName);
           formData.set("reason", reason);
+          formData.set("signatureImage", signatureImageFile);
+          for (const [key, value] of Object.entries(placementToFormData(signaturePlacement))) {
+            formData.set(key, value);
+          }
 
           try {
             const serverSigned = await signViaServer(formData);
@@ -377,6 +527,34 @@ export default function Home() {
                 )}
               </div>
 
+              <div className="grid gap-3">
+                <FileUpload
+                  id="signature-image"
+                  label="Visible signature image"
+                  hint="Upload a PNG or JPG to place on the PDF. This image becomes the visible placeholder."
+                  accept=".png,.jpg,.jpeg,image/png,image/jpeg"
+                  file={signatureImageFile}
+                  onChange={(file) => {
+                    setSignatureImageFile(file);
+                    setFieldErrors((current) => ({ ...current, signatureImage: "" }));
+                  }}
+                  error={fieldErrors.signatureImage}
+                  required
+                />
+
+                <SignaturePlacementEditor
+                  pageSize={pageSize}
+                  placement={signaturePlacement}
+                  imageUrl={signatureImageUrl}
+                  imageAspectRatio={signatureImageAspectRatio}
+                  onInteract={() => setPlacementDirty(true)}
+                  onChange={(placement) => {
+                    setPlacementDirty(true);
+                    setSignaturePlacement(placement);
+                  }}
+                />
+              </div>
+
               <div className="grid gap-6 md:grid-cols-2">
                 <label className="block">
                   <span className="text-sm font-medium text-slate-900">Password *</span>
@@ -455,6 +633,7 @@ export default function Home() {
                 <p className="font-medium text-slate-900">Validation</p>
                 <p className="mt-1">PDF: application/pdf, max 10 MB.</p>
                 <p>Certificate: .p12/.pfx, max 1 MB.</p>
+                <p>Signature image: PNG/JPG, max 2 MB.</p>
               </div>
               <div className="rounded-2xl bg-slate-50 p-4">
                 <p className="font-medium text-slate-900">Behavior</p>

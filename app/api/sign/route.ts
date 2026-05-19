@@ -6,6 +6,7 @@ import {
   MAX_SERVER_BYTES,
   MAX_PDF_BYTES,
   MAX_CERT_BYTES,
+  MAX_VISIBLE_SIGNATURE_BYTES,
   PdfSignerError
 } from "@/lib/pdfSigner";
 
@@ -22,9 +23,15 @@ export async function POST(request: Request) {
     const formData = await request.formData();
     const pdfFile = formData.get("pdf");
     const certFile = formData.get("certificate");
+    const signatureImageFile = formData.get("signatureImage");
     const password = String(formData.get("password") ?? "");
     const signerName = String(formData.get("signerName") ?? "");
     const reason = String(formData.get("reason") ?? "Signed for personal use");
+    const signaturePageIndex = Math.max(0, Math.floor(Number(formData.get("pageIndex") ?? 0)));
+    const signatureX = Number(formData.get("x") ?? NaN);
+    const signatureY = Number(formData.get("y") ?? NaN);
+    const signatureWidth = Number(formData.get("width") ?? NaN);
+    const signatureHeight = Number(formData.get("height") ?? NaN);
 
     if (!(pdfFile instanceof File) || pdfFile.type !== "application/pdf") {
       return jsonError(400, "INVALID_PDF", "Please upload a valid PDF file.");
@@ -50,12 +57,49 @@ export async function POST(request: Request) {
       return jsonError(413, "CERTIFICATE_TOO_LARGE", "Certificate must be 1 MB or smaller.");
     }
 
+    if (!(signatureImageFile instanceof File)) {
+      return jsonError(400, "INVALID_SIGNATURE_IMAGE", "Please upload a PNG or JPG signature image.");
+    }
+
+    if (!["image/png", "image/jpeg"].includes(signatureImageFile.type) && !/\.(png|jpe?g)$/i.test(signatureImageFile.name)) {
+      return jsonError(400, "INVALID_SIGNATURE_IMAGE", "Please upload a PNG or JPG signature image.");
+    }
+
+    if (signatureImageFile.size > MAX_VISIBLE_SIGNATURE_BYTES) {
+      return jsonError(413, "SIGNATURE_IMAGE_TOO_LARGE", "Signature image must be 2 MB or smaller.");
+    }
+
+    if (
+      !Number.isFinite(signatureX) ||
+      !Number.isFinite(signatureY) ||
+      !Number.isFinite(signatureWidth) ||
+      !Number.isFinite(signatureHeight) ||
+      signatureWidth <= 0 ||
+      signatureHeight <= 0
+    ) {
+      return jsonError(400, "INVALID_SIGNATURE_PLACEMENT", "Signature placement is invalid.");
+    }
+
     const signed = await signPdfDocument({
       pdfBytes: new Uint8Array(await pdfFile.arrayBuffer()),
       certificateBytes: new Uint8Array(await certFile.arrayBuffer()),
       certificatePassword: password,
       signerName,
-      reason
+      reason,
+      visibleSignature: {
+        bytes: new Uint8Array(await signatureImageFile.arrayBuffer()),
+        mimeType:
+          signatureImageFile.type === "image/png" || /\.png$/i.test(signatureImageFile.name)
+            ? "image/png"
+            : "image/jpeg",
+        placement: {
+          pageIndex: Number.isFinite(signaturePageIndex) ? signaturePageIndex : 0,
+          x: signatureX,
+          y: signatureY,
+          width: signatureWidth,
+          height: signatureHeight
+        }
+      }
     });
 
     return new NextResponse(Buffer.from(signed), {

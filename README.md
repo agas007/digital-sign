@@ -9,6 +9,7 @@ Next.js App Router app for signing PDFs with your own self-signed `.p12/.pfx` ce
 - Keep files out of persistent server storage.
 - Return the signed PDF as a download.
 - Use local browser signing first, with a server fallback for smaller PDFs.
+- Add a visible JPG/PNG signature placeholder that can be dragged and resized on the first page.
 
 ## Important limitation
 
@@ -69,6 +70,13 @@ No database or storage service is required.
 The app can remember your certificate in the current browser profile so you do not need to upload it every time.
 
 If you clear browser storage or use another device/browser, you must upload the certificate again.
+
+## Visible signature placement
+
+- Upload a PNG or JPG signature image.
+- Drag the image on the preview to move it.
+- Resize it from the bottom-right handle.
+- The visible placeholder is applied on the first page only.
 
 ## Validation limits
 
